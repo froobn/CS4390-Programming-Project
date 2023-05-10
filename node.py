@@ -59,7 +59,7 @@ class Node:
         self.id = id
         self.duration = duration
         self.dest_id = dest_id
-        self.message = message
+        self.message = message # END OF MESSAGE DELIMITER
         self.starting_time = starting_time
         self.neighbors = neighbors
 
@@ -71,7 +71,6 @@ class Node:
 
         # MAIN NODE LIFECYCLE
         self.live()
-        self.die()
 
     def live(self):
         print("OPENING NODE ", self.id)
@@ -84,17 +83,13 @@ class Node:
 
             # SLEEP 1 SECOND
             time.sleep(1)
-            return # TODO DELETE THIS
+            break # TODO DELETE THIS AND IMPLEMENT PROPER STUFF
         
         # TRANSPORT OUTPUT ALL RECIEVED
         self.Transport.output_all()
+        print("CLOSING: ", self.id)
+        return
 
-    def die(self):
-        print("CLOSING NODE ", self.id)
-        pass
-
-    def clean_channels(self):
-        pass
 
 # ----------------------- LAYERS -----------------------
 #############################################################
@@ -107,10 +102,13 @@ class Transport_Layer:
     def __init__(self, parent_node: Node) -> None:
         self.parent_node = parent_node
         self.sequence_number = 0
+        self.buffer = []
 
     def send(self, nack_message=""):
         if nack_message:
             self.parent_node.Network.receive_from_transport(nack_message, self.parent_node.dest_id)
+            return
+        elif(self.parent_node.message == ""):
             return
         
         # else
@@ -123,6 +121,8 @@ class Transport_Layer:
             # Send the data message to the network layer
             self.parent_node.Network.receive_from_transport(data_message, self.parent_node.dest_id)
 
+            # TODO IMPLEMENT NACKING
+
             # while nack_received is not None:
             #     nack_sn = int(nack_message[3:5])
             #     if nack_sn > self.sequence_number:
@@ -132,14 +132,31 @@ class Transport_Layer:
 
             self.sequence_number = (self.sequence_number + 1) % 100
 
-    def receieve_from_network(self, message: str, length: int, source: int):
-        nack_message = 'N{}{}{:02d}'.format(self.parent_node.id, self.parent_node.dest_id, self.sequence_number)
-        self.parent_node.Network.receive_from_transport(nack_message, self.parent_node.dest_id)
-        #NACK OR RESEND
-        pass
+    def receieve_from_network(self, message: str):
+        msg_type = message[0]
+        source = message[1]
+        seq_num = message[3:5]
+        if int(seq_num) >= self.sequence_number:
+            self.sequence_number = int(seq_num)
+        data = message[5:]
+        self.buffer.append(Packet(seq_num=seq_num, message=data, source=source,msg_type=msg_type))
 
     def output_all(self):
-        pass
+        reassembled = ""
+        # FIX POTENTIAL REORDERING
+        sorted_buffer = sorted(self.buffer, key=lambda p: (p.source,p.seq_num))
+        if len(sorted_buffer) == 0:
+            return
+        curr_source = sorted_buffer[0].source
+        for message in sorted_buffer:
+            if(message.source != curr_source):
+                with open("output/thenode{}recieved.txt".format(self.parent_node.id), "a") as output:
+                    output.write(reassembled + "\n")
+                reassembled = ""
+            curr_source = message.source
+            reassembled += message.message
+        with open("output/thenode{}recieved.txt".format(self.parent_node.id), "a") as output:
+            output.write(reassembled+"\n")
 
 #############################################################
 class Network_Layer:
@@ -152,14 +169,21 @@ class Network_Layer:
     def receive_from_transport(self, message: str, dest: int):
         data_message = 'D{}{:02d}{}'.format(dest,len(message), message)
         if len(data_message) < 15:
-                data_message = data_message.ljust(15, ' ')
+            data_message = data_message.ljust(15, ' ')
         self.parent_node.Datalink.receive_from_network(data_message, dest)
 
-    def receive_from_datalink(self, message: str, neighbor_id: int):
-        pass
+    def receive_from_datalink(self, message: str):
+        dest = int(message[1])
+        length = int(message[2:4])
+        data_message = message[4:4+length]
+        if(dest == self.parent_node.id):
+            self.parent_node.Transport.receieve_from_network(data_message)
+        else: # ROUTE
+            pass
 
     def network_route(self):
         pass
+        #TODO IMPLEMENT ROUTING AND LINK STATE FLOODING!!!!
 
 #############################################################
 class Datalink_Layer:
@@ -176,7 +200,6 @@ class Datalink_Layer:
         self.bookmarks = {}
     def receive_from_network(self, message: str, next_hop: int):
         '''
-        CALLED BY NETWORK LAYER
         gives network layer message to this (datalink) layer
         outputs to the output channel file the message given by the network layer
         '''
@@ -187,7 +210,7 @@ class Datalink_Layer:
         checksum = sum(message_ascii) % 100
         
         # FORMAT MESSAGE
-        formatted_message = 'XX{:15}{}\n'.format(message_ascii.decode('ascii'), str(checksum).zfill(2))
+        formatted_message = 'XX{:15}{}'.format(message_ascii.decode('ascii'), str(checksum).zfill(2))
         # WRITE TO CHANNEL
         with open("channels/from{}to{}.txt".format(self.parent_node.id, next_hop), "a") as channel:
             channel.write(formatted_message)
@@ -201,14 +224,34 @@ class Datalink_Layer:
 
         # GET CURRENT INPUT CHANNELS
         self.set_input_channels()
-
+        
         # READ EACH CHANNEL UNTIL EOF FOR EACH CHANNEL
         for channel in self.input_channels:
             print("READING: ", channel)
             with open('channels/'+channel, 'r') as f:
+                f.read(self.bookmarks[channel])
+                message = ""
                 while True:
                     byte = f.read(1)
-                    print(byte)
+                    message += byte
+                    self.bookmarks[channel] += 1
+                    if len(message) >= 19: # END OF FRAME
+                        # CHECK THE FORMATTING
+                        if(message[:2] != "XX"):
+                            print("CORRUPTION", message) # TODO IMPLEMENT
+                            return
+                        message_ascii = message[2:17].encode('ascii')
+                        checksum = sum(message_ascii) % 100
+                        if(checksum != int(message[17:])):
+                            print("CORRUPTION", message) # TODO IMPLEMENT
+                            return
+                        
+                        # MESSAGE LOOKS GOOD :)
+                        self.parent_node.Network.receive_from_datalink(message[2:17])
+                        message=""
+                        # PROCESS FRAME
+                        
+
                     if not byte:
                         break
                 # message = ""
@@ -234,7 +277,7 @@ class Datalink_Layer:
                 continue
             f = os.path.join('channels', filename)
             if os.path.isfile(f) and get_channel_io(filename)[1] == self.parent_node.id:
-                print("appending: ", filename)
+                print("APPENDING: ", filename)
                 self.input_channels.append(filename)
                 self.bookmarks[filename] = 0
 #############################################################
@@ -253,9 +296,25 @@ def get_channel_io(filename:str):
     X, Y = digits[:1], digits[1:]
     return [X[0], Y[0]]
 
+class Packet:
+    def __init__(self, seq_num, message,source,msg_type="D"):
+        self.seq_num = seq_num
+        self.message = message
+        self.source = source
+        self.msg_type = msg_type
+
+# MAKES IT PRINT IN THE CONSOLE PRETTIER 
+print()
 
 # ARGUMENT PROCESSING
 args = sys.argv
+
+# MAKE DIRECTORIES IF NOT PRESENT
+if not os.path.exists("channels"):
+    os.makedirs("channels")
+
+if not os.path.exists("output"):
+    os.makedirs("output")
 
 if len(args) > 6: # SOURCE NODES
     node = Node(id=int(args[1]), duration=int(args[2]), dest_id=int(args[3]),message=args[4],starting_time=int(args[5]),neighbors=parse_neighbors(args[6]))
