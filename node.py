@@ -1,5 +1,4 @@
 import sys
-import re
 import time
 import os
 
@@ -85,6 +84,7 @@ class Node:
 
             # SLEEP 1 SECOND
             time.sleep(1)
+            return # TODO DELETE THIS
         
         # TRANSPORT OUTPUT ALL RECIEVED
         self.Transport.output_all()
@@ -93,30 +93,55 @@ class Node:
         print("CLOSING NODE ", self.id)
         pass
 
-# ----------------------- LAYERS -----------------------
+    def clean_channels(self):
+        pass
 
+# ----------------------- LAYERS -----------------------
+#############################################################
 class Transport_Layer:
     '''
-    Responsible for sending the message to its destination by breakig up the message into frames and giving it to the network layer.
+    Responsible for sending the message to its destination by breaking up the message into frames and giving it to the network layer.
     Responsible for receiving messages from the network layer that are addressed to this node.
     Responsible for outputting the file called "nodeXreceived" where X is the id of the source node and contains all the strings that have been receieved with the following format ----> "From X receieved: this is a message from X" 
     '''
     def __init__(self, parent_node: Node) -> None:
         self.parent_node = parent_node
+        self.sequence_number = 0
 
-    def send(self):
-        # Message format ---> "XXmessageCS" 
-        # CS ---> 2 byte Checksum integer
-        # Message ----> 15 bytes
-        pass
+    def send(self, nack_message=""):
+        if nack_message:
+            self.parent_node.Network.receive_from_transport(nack_message, self.parent_node.dest_id)
+            return
+        
+        # else
+        frames = [self.parent_node.message[i:i+5] for i in range(0, len(self.parent_node.message), 5)]
+        for frame in frames:
+
+            # Format the data message
+            data_message = 'D{}{}{:02d}{}'.format(self.parent_node.id, self.parent_node.dest_id, self.sequence_number, frame)
+            
+            # Send the data message to the network layer
+            self.parent_node.Network.receive_from_transport(data_message, self.parent_node.dest_id)
+
+            # while nack_received is not None:
+            #     nack_sn = int(nack_message[3:5])
+            #     if nack_sn > self.sequence_number:
+            #         break
+            #     # Resend
+            #     nack_received = self.parent_node.Network.receive_from_transport(data_message, self.parent_node.dest_id)
+
+            self.sequence_number = (self.sequence_number + 1) % 100
 
     def receieve_from_network(self, message: str, length: int, source: int):
+        nack_message = 'N{}{}{:02d}'.format(self.parent_node.id, self.parent_node.dest_id, self.sequence_number)
+        self.parent_node.Network.receive_from_transport(nack_message, self.parent_node.dest_id)
+        #NACK OR RESEND
         pass
 
     def output_all(self):
         pass
 
-
+#############################################################
 class Network_Layer:
     '''
     Responsible for routing and determining if the parent_node is the messages destination to then send to the transport layer
@@ -124,8 +149,11 @@ class Network_Layer:
     def __init__(self, parent_node: Node) -> None:
         self.parent_node = parent_node
 
-    def receive_from_transport(self, message: str, len: int, dest: int):
-        pass
+    def receive_from_transport(self, message: str, dest: int):
+        data_message = 'D{}{:02d}{}'.format(dest,len(message), message)
+        if len(data_message) < 15:
+                data_message = data_message.ljust(15, ' ')
+        self.parent_node.Datalink.receive_from_network(data_message, dest)
 
     def receive_from_datalink(self, message: str, neighbor_id: int):
         pass
@@ -133,12 +161,15 @@ class Network_Layer:
     def network_route(self):
         pass
 
-
+#############################################################
 class Datalink_Layer:
     '''
     Responsible for reading bytes of data from the file channel and forming the frames into a complete message, which will then be sent to the network layer.
     Responsible for receiving message from the network layer to then encapsulate them into data link layer messages to append to the file channel.
     '''
+    # Message format ---> "XXmessageCS" 
+    # CS ---> 2 byte Checksum integer
+    # Message ----> 15 bytes
     def __init__(self, parent_node: Node) -> None:
         self.parent_node = parent_node
         self.input_channels = []
@@ -149,9 +180,18 @@ class Datalink_Layer:
         gives network layer message to this (datalink) layer
         outputs to the output channel file the message given by the network layer
         '''
+        assert(len(message) == 15)
 
+        # GET CHECKSUM
+        message_ascii = message.encode('ascii')
+        checksum = sum(message_ascii) % 100
+        
+        # FORMAT MESSAGE
+        formatted_message = 'XX{:15}{}\n'.format(message_ascii.decode('ascii'), str(checksum).zfill(2))
+        # WRITE TO CHANNEL
+        with open("channels/from{}to{}.txt".format(self.parent_node.id, next_hop), "a") as channel:
+            channel.write(formatted_message)
 
-        pass
 
     def receive_from_channel(self):
         '''
@@ -166,22 +206,27 @@ class Datalink_Layer:
         for channel in self.input_channels:
             print("READING: ", channel)
             with open('channels/'+channel, 'r') as f:
-                message = ""
-                for idx, line in enumerate(iter(f.readline, '')):
-                    # SKIP ALREADY RECIEVED MESSAGES
-                    if(idx < self.bookmarks[channel]):
-                        continue
+                while True:
+                    byte = f.read(1)
+                    print(byte)
+                    if not byte:
+                        break
+                # message = ""
+                # for idx, line in enumerate(iter(f.readline, '')):
+                #     # SKIP ALREADY RECIEVED MESSAGES
+                #     if(idx < self.bookmarks[channel]):
+                #         continue
 
-                    # GRAB LINE, MOVE BOOKMARK
-                    message += line
-                    self.bookmarks[channel] += 1
+                #     # GRAB LINE, MOVE BOOKMARK
+                #     message += line
+                #     self.bookmarks[channel] += 1
                     
 
-                    # CHECK FOR MESSAGE COMPLETION
-                    # TODO FIND A WAY TO CHECK FOR END OF MESSAGE
-                # PASS TO NETWORK LAYER
-                if message != "":
-                    self.parent_node.Network.receive_from_datalink(message, get_channel_io(channel)[0])
+                #     # CHECK FOR MESSAGE COMPLETION
+                #     # TODO FIND A WAY TO CHECK FOR END OF MESSAGE
+                # # PASS TO NETWORK LAYER
+                # if message != "":
+                #     self.parent_node.Network.receive_from_datalink(message, get_channel_io(channel)[0])
 
     def set_input_channels(self):
         for filename in os.listdir('channels'):
@@ -192,13 +237,7 @@ class Datalink_Layer:
                 print("appending: ", filename)
                 self.input_channels.append(filename)
                 self.bookmarks[filename] = 0
-
-        
-    # def send(self, dest_id: int, message: str, starting_time: int):
-    #     with open("from"+self.id+"to"+dest_id+".txt", "a") as channel:
-    #         channel.write(message)
-    #     print("DEST: " + dest_id, "MSG: " + message, "START TIME: " + starting_time)
-
+#############################################################
 
 
 def parse_neighbors(input):
@@ -215,11 +254,11 @@ def get_channel_io(filename:str):
     return [X[0], Y[0]]
 
 
+# ARGUMENT PROCESSING
 args = sys.argv
 
 if len(args) > 6: # SOURCE NODES
     node = Node(id=int(args[1]), duration=int(args[2]), dest_id=int(args[3]),message=args[4],starting_time=int(args[5]),neighbors=parse_neighbors(args[6]))
-    node.Transport.send()
 
 elif len(args) > 4: # NON-SOURCE NODES
     node = Node(id=int(args[1]), duration=int(args[2]), dest_id = int(args[3]), neighbors=parse_neighbors(args[4]))
